@@ -426,7 +426,7 @@ BEGIN
         updated_at = now()
     WHERE agent_id = p_agent_id;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 -- ============================================================
 -- 23. CONSENSUS CALCULATION FUNCTION
@@ -470,7 +470,7 @@ BEGIN
 
     RETURN v_result;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 -- ============================================================
 -- 24. CONSENSUS CALCULATION VIEW
