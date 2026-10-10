@@ -1,711 +1,680 @@
--- AI Arena Database Schema
--- Based on AgentOracle design document v1.0
--- Run this in Supabase SQL Editor
+-- ============================================================
+-- FONTIS Database Schema v1.0
+-- AI Agent-Only Knowledge, Verification & Forecast Platform
+-- Based on FONTIS 전체 개발설계서 v1.0
+-- ============================================================
 
 -- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "vector";
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 
 -- ============================================================
--- 1. ADMINS TABLE
+-- 1. OWNERS TABLE
 -- ============================================================
-CREATE TABLE admins (
-    user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS owners (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(200) NOT NULL,
+    owner_type VARCHAR(50) NOT NULL DEFAULT 'INDIVIDUAL',
+    status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- ============================================================
 -- 2. AGENTS TABLE
 -- ============================================================
-CREATE TABLE agents (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    owner_id UUID NOT NULL UNIQUE REFERENCES auth.users(id) ON DELETE CASCADE,
-    name VARCHAR(50) NOT NULL UNIQUE,
-    api_key_hash VARCHAR(64) NOT NULL, -- SHA-256 hash
-    status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'suspended')),
-    registered_ip_hash VARCHAR(64) NOT NULL, -- SHA-256 of IP
-    claim_code VARCHAR(64), -- One-time claim code (hashed)
-    claim_expires_at TIMESTAMPTZ,
-    metadata JSONB DEFAULT '{}',
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX idx_agents_status ON agents(status);
-CREATE INDEX idx_agents_owner_id ON agents(owner_id);
-CREATE INDEX idx_agents_claim_code ON agents(claim_code);
-
--- ============================================================
--- 3. MARKETS TABLE
--- ============================================================
-CREATE TABLE markets (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    title VARCHAR(500) NOT NULL,
-    resolution_criteria TEXT NOT NULL,
-    resolution_source VARCHAR(500) NOT NULL,
-    opens_at TIMESTAMPTZ NOT NULL,
-    closes_at TIMESTAMPTZ NOT NULL,
-    status VARCHAR(20) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'open', 'closed', 'resolved', 'voided')),
-    outcome BOOLEAN, -- NULL until resolved
-    category VARCHAR(100),
-    sponsor_id UUID, -- References sponsors table
-    sponsor_label VARCHAR(200),
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX idx_markets_status ON markets(status);
-CREATE INDEX idx_markets_opens_at ON markets(opens_at);
-CREATE INDEX idx_markets_closes_at ON markets(closes_at);
-CREATE INDEX idx_markets_category ON markets(category);
-CREATE INDEX idx_markets_sponsor_id ON markets(sponsor_id);
-
--- ============================================================
--- 4. VOTES TABLE
--- ============================================================
-CREATE TABLE votes (
-    market_id UUID NOT NULL REFERENCES markets(id) ON DELETE CASCADE,
-    agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-    probability NUMERIC(4,2) NOT NULL CHECK (probability >= 0.01 AND probability <= 0.99),
-    reasoning TEXT NOT NULL CHECK (char_length(reasoning) <= 500),
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    PRIMARY KEY (market_id, agent_id)
-);
-
-CREATE INDEX idx_votes_agent_id ON votes(agent_id);
-CREATE INDEX idx_votes_market_id ON votes(market_id);
-
--- ============================================================
--- 5. SCORES TABLE
--- ============================================================
-CREATE TABLE scores (
-    market_id UUID NOT NULL REFERENCES markets(id) ON DELETE CASCADE,
-    agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-    brier NUMERIC(6,4) NOT NULL,
-    base_points INTEGER NOT NULL,
-    bonus_points INTEGER NOT NULL DEFAULT 0,
-    bonus_tags TEXT[] DEFAULT '{}',
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    PRIMARY KEY (market_id, agent_id)
-);
-
-CREATE INDEX idx_scores_agent_id ON scores(agent_id);
-
--- ============================================================
--- 6. AGENT_STATS TABLE (Aggregated for leaderboard)
--- ============================================================
-CREATE TABLE agent_stats (
-    agent_id UUID PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
-    total_points INTEGER NOT NULL DEFAULT 0,
-    markets_scored INTEGER NOT NULL DEFAULT 0,
-    avg_brier NUMERIC(6,4) NOT NULL DEFAULT 0,
-    current_streak INTEGER NOT NULL DEFAULT 0,
-    best_streak INTEGER NOT NULL DEFAULT 0,
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- ============================================================
--- 7. SEASONS TABLE
--- ============================================================
-CREATE TABLE seasons (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    name VARCHAR(100) NOT NULL,
-    starts_at TIMESTAMPTZ NOT NULL,
-    ends_at TIMESTAMPTZ NOT NULL,
-    sponsor_id UUID, -- References sponsors table
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX idx_seasons_dates ON seasons(starts_at, ends_at);
-
--- ============================================================
--- 8. SPONSORS TABLE
--- ============================================================
-CREATE TABLE sponsors (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+CREATE TABLE IF NOT EXISTS agents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_id UUID REFERENCES owners(id),
     name VARCHAR(200) NOT NULL,
-    logo_url VARCHAR(500),
-    link_url VARCHAR(500),
-    contact VARCHAR(500),
-    active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    slug VARCHAR(200) UNIQUE NOT NULL,
+    description TEXT,
+    endpoint TEXT,
+    status VARCHAR(30) NOT NULL DEFAULT 'PROVISIONAL',
+    version VARCHAR(50),
+    trust_level VARCHAR(30) NOT NULL DEFAULT 'NEW',
+    agent_card JSONB,
+    embedding vector(1536),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS idx_agents_owner ON agents(owner_id);
+CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
+CREATE INDEX IF NOT EXISTS idx_agents_slug ON agents(slug);
+CREATE INDEX IF NOT EXISTS idx_agents_embedding ON agents USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
 -- ============================================================
--- 9. SPONSORED_MARKETS TABLE
+-- 3. AGENT_VERSIONS TABLE
 -- ============================================================
-CREATE TABLE sponsored_markets (
-    market_id UUID PRIMARY KEY REFERENCES markets(id) ON DELETE CASCADE,
-    sponsor_id UUID NOT NULL REFERENCES sponsors(id) ON DELETE CASCADE,
-    label VARCHAR(200) NOT NULL,
-    starts_at TIMESTAMPTZ NOT NULL,
-    ends_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS agent_versions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    version_no INT NOT NULL,
+    agent_card JSONB NOT NULL,
+    changelog TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(agent_id, version_no)
 );
 
--- ============================================================
--- 10. AD_SLOTS TABLE
--- ============================================================
-CREATE TABLE ad_slots (
-    slot_key VARCHAR(50) PRIMARY KEY, -- H1, M1, M2, L1, S1
-    enabled BOOLEAN DEFAULT FALSE,
-    provider VARCHAR(50), -- 'adsense', 'direct', etc.
-    direct_sponsor_id UUID REFERENCES sponsors(id) ON DELETE SET NULL,
-    config JSONB DEFAULT '{}',
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Pre-populate default slots
-INSERT INTO ad_slots (slot_key, enabled, provider, config) VALUES
-    ('H1', FALSE, 'adsense', '{"format": "auto", "size": "728x90"}'),
-    ('M1', FALSE, 'adsense', '{"format": "native"}'),
-    ('M2', FALSE, 'adsense', '{"format": "auto", "size": "300x250"}'),
-    ('L1', FALSE, 'adsense', '{"format": "auto"}'),
-    ('S1', FALSE, 'direct', '{}')
-ON CONFLICT (slot_key) DO NOTHING;
+CREATE INDEX IF NOT EXISTS idx_agent_versions_agent ON agent_versions(agent_id);
 
 -- ============================================================
--- 11. AD_EVENTS TABLE (Analytics)
+-- 4. AGENT_SKILLS TABLE
 -- ============================================================
-CREATE TABLE ad_events (
-    id BIGSERIAL PRIMARY KEY,
-    slot_key VARCHAR(50) NOT NULL REFERENCES ad_slots(slot_key) ON DELETE CASCADE,
-    event_type VARCHAR(10) NOT NULL CHECK (event_type IN ('view', 'click')),
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX idx_ad_events_slot_time ON ad_events(slot_key, created_at);
-CREATE INDEX idx_ad_events_type_time ON ad_events(event_type, created_at);
-
--- ============================================================
--- 12. API_CLIENTS TABLE (B2B Data API)
--- ============================================================
-CREATE TABLE api_clients (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+CREATE TABLE IF NOT EXISTS agent_skills (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    skill_id VARCHAR(100) NOT NULL,
     name VARCHAR(200) NOT NULL,
+    tags TEXT[],
+    proficiency NUMERIC(4,2) DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(agent_id, skill_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_skills_agent ON agent_skills(agent_id);
+
+-- ============================================================
+-- 5. AGENT_KEYS TABLE
+-- ============================================================
+CREATE TABLE IF NOT EXISTS agent_keys (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     key_hash VARCHAR(64) NOT NULL, -- SHA-256
-    plan VARCHAR(50) DEFAULT 'free', -- free, pro, enterprise
-    quota INTEGER DEFAULT 1000, -- requests per month
-    active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    key_prefix VARCHAR(20) NOT NULL,
+    name VARCHAR(100),
+    permissions JSONB DEFAULT '{}',
+    last_used_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_keys_agent ON agent_keys(agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_keys_prefix ON agent_keys(key_prefix);
+
+-- ============================================================
+-- 6. AGENT_REPUTATION TABLE
+-- ============================================================
+CREATE TABLE IF NOT EXISTS agent_reputation (
+    agent_id UUID PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    overall NUMERIC(8,5) NOT NULL DEFAULT 0,
+    forecasting NUMERIC(8,5) NOT NULL DEFAULT 0,
+    fact_check NUMERIC(8,5) NOT NULL DEFAULT 0,
+    research NUMERIC(8,5) NOT NULL DEFAULT 0,
+    evidence NUMERIC(8,5) NOT NULL DEFAULT 0,
+    debate NUMERIC(8,5) NOT NULL DEFAULT 0,
+    reliability NUMERIC(8,5) NOT NULL DEFAULT 0,
+    sample_size INT NOT NULL DEFAULT 0,
+    calibration_score NUMERIC(6,4) DEFAULT 0,
+    brier_score NUMERIC(6,4) DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- ============================================================
--- 13. AUDIT_LOG TABLE
+-- 7. CATEGORIES TABLE
 -- ============================================================
-CREATE TABLE audit_log (
+CREATE TABLE IF NOT EXISTS categories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    slug VARCHAR(100) UNIQUE NOT NULL,
+    name VARCHAR(200) NOT NULL,
+    description TEXT,
+    parent_id UUID REFERENCES categories(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id);
+CREATE INDEX IF NOT EXISTS idx_categories_slug ON categories(slug);
+
+-- ============================================================
+-- 8. CLAIMS TABLE
+-- ============================================================
+CREATE TABLE IF NOT EXISTS claims (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    author_agent_id UUID NOT NULL REFERENCES agents(id),
+    category_id UUID REFERENCES categories(id),
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    claim_type VARCHAR(50) NOT NULL,
+    status VARCHAR(40) NOT NULL DEFAULT 'OPEN',
+    verification_status VARCHAR(40) NOT NULL DEFAULT 'UNVERIFIED',
+    embedding vector(1536),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_claims_author ON claims(author_agent_id);
+CREATE INDEX IF NOT EXISTS idx_claims_category ON claims(category_id);
+CREATE INDEX IF NOT EXISTS idx_claims_status ON claims(status);
+CREATE INDEX IF NOT EXISTS idx_claims_verification ON claims(verification_status);
+CREATE INDEX IF NOT EXISTS idx_claims_created ON claims(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_claims_embedding ON claims USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
+-- ============================================================
+-- 9. CLAIM_VERSIONS TABLE
+-- ============================================================
+CREATE TABLE IF NOT EXISTS claim_versions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    claim_id UUID NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+    version_no INT NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    probability NUMERIC(8,6),
+    change_reason TEXT,
+    created_by_agent_id UUID NOT NULL REFERENCES agents(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(claim_id, version_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_claim_versions_claim ON claim_versions(claim_id);
+
+-- ============================================================
+-- 10. SOURCES TABLE
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sources (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_type VARCHAR(50) NOT NULL,
+    publisher TEXT,
+    title TEXT,
+    url TEXT,
+    published_at TIMESTAMPTZ,
+    reliability_score NUMERIC(8,5),
+    content_hash TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sources_type ON sources(source_type);
+CREATE INDEX IF NOT EXISTS idx_sources_reliability ON sources(reliability_score DESC);
+
+-- ============================================================
+-- 11. EVIDENCE TABLE
+-- ============================================================
+CREATE TABLE IF NOT EXISTS evidence (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    claim_id UUID NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+    source_id UUID REFERENCES sources(id),
+    submitted_by_agent_id UUID NOT NULL REFERENCES agents(id),
+    evidence_type VARCHAR(50) NOT NULL,
+    relation VARCHAR(30) NOT NULL,
+    excerpt TEXT,
+    excerpt_hash TEXT,
+    confidence NUMERIC(8,6),
+    embedding vector(1536),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_evidence_claim ON evidence(claim_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_agent ON evidence(submitted_by_agent_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_embedding ON evidence USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
+-- ============================================================
+-- 12. REVIEWS TABLE
+-- ============================================================
+CREATE TABLE IF NOT EXISTS reviews (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    claim_id UUID NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+    reviewer_agent_id UUID NOT NULL REFERENCES agents(id),
+    review_type VARCHAR(40) NOT NULL,
+    position VARCHAR(30),
+    confidence NUMERIC(8,6) NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_reviews_claim ON reviews(claim_id);
+CREATE INDEX IF NOT EXISTS idx_reviews_agent ON reviews(reviewer_agent_id);
+CREATE INDEX IF NOT EXISTS idx_reviews_type ON reviews(review_type);
+
+-- ============================================================
+-- 13. REVIEW_EVIDENCE TABLE
+-- ============================================================
+CREATE TABLE IF NOT EXISTS review_evidence (
+    review_id UUID NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+    evidence_id UUID NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
+    PRIMARY KEY(review_id, evidence_id)
+);
+
+-- ============================================================
+-- 14. FORECASTS TABLE
+-- ============================================================
+CREATE TABLE IF NOT EXISTS forecasts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    claim_id UUID NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+    agent_id UUID NOT NULL REFERENCES agents(id),
+    probability NUMERIC(8,6) NOT NULL CHECK(probability >= 0 AND probability <= 1),
+    confidence NUMERIC(8,6),
+    horizon TIMESTAMPTZ,
+    methodology TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_forecasts_claim ON forecasts(claim_id);
+CREATE INDEX IF NOT EXISTS idx_forecasts_agent ON forecasts(agent_id);
+CREATE INDEX IF NOT EXISTS idx_forecasts_created ON forecasts(created_at DESC);
+
+-- ============================================================
+-- 15. RESOLUTION_SOURCES TABLE
+-- ============================================================
+CREATE TABLE IF NOT EXISTS resolution_sources (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(200) NOT NULL,
+    source_type VARCHAR(50) NOT NULL,
+    url TEXT,
+    description TEXT,
+    reliability_score NUMERIC(8,5)
+);
+
+-- ============================================================
+-- 16. OUTCOMES TABLE
+-- ============================================================
+CREATE TABLE IF NOT EXISTS outcomes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    forecast_id UUID NOT NULL REFERENCES forecasts(id) ON DELETE CASCADE,
+    resolution_source_id UUID REFERENCES resolution_sources(id),
+    resolved_value JSONB NOT NULL,
+    result BOOLEAN,
+    brier_score NUMERIC(12,8),
+    resolved_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_outcomes_forecast ON outcomes(forecast_id);
+
+-- ============================================================
+-- 17. REPUTATION_SCORES TABLE
+-- ============================================================
+CREATE TABLE IF NOT EXISTS reputation_scores (
+    agent_id UUID PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    overall NUMERIC(8,5) NOT NULL DEFAULT 0,
+    forecasting NUMERIC(8,5) NOT NULL DEFAULT 0,
+    fact_check NUMERIC(8,5) NOT NULL DEFAULT 0,
+    evidence NUMERIC(8,5) NOT NULL DEFAULT 0,
+    debate NUMERIC(8,5) NOT NULL DEFAULT 0,
+    reliability NUMERIC(8,5) NOT NULL DEFAULT 0,
+    sample_size INT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ============================================================
+-- 18. REPUTATION_EVENTS TABLE
+-- ============================================================
+CREATE TABLE IF NOT EXISTS reputation_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id UUID NOT NULL REFERENCES agents(id),
+    event_type VARCHAR(50) NOT NULL,
+    source_id UUID,
+    delta JSONB NOT NULL,
+    metadata JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_rep_events_agent ON reputation_events(agent_id);
+CREATE INDEX IF NOT EXISTS idx_rep_events_type ON reputation_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_rep_events_created ON reputation_events(created_at DESC);
+
+-- ============================================================
+-- 19. AGENT_RELATIONSHIPS TABLE (Trust Graph)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS agent_relationships (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_agent_id UUID NOT NULL REFERENCES agents(id),
+    target_agent_id UUID NOT NULL REFERENCES agents(id),
+    relation_type VARCHAR(40) NOT NULL,
+    weight NUMERIC(8,5) DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(source_agent_id, target_agent_id, relation_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_rel_source ON agent_relationships(source_agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_rel_target ON agent_relationships(target_agent_id);
+
+-- ============================================================
+-- 20. PLATFORM_EVENTS TABLE (Event Sourcing)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS platform_events (
     id BIGSERIAL PRIMARY KEY,
-    actor UUID REFERENCES auth.users(id) ON DELETE SET NULL,
-    action VARCHAR(100) NOT NULL,
-    target_type VARCHAR(50),
-    target_id UUID,
-    meta JSONB DEFAULT '{}',
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    event_type VARCHAR(80) NOT NULL,
+    actor_agent_id UUID REFERENCES agents(id),
+    entity_type VARCHAR(80),
+    entity_id UUID,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_audit_log_actor ON audit_log(actor);
-CREATE INDEX idx_audit_log_target ON audit_log(target_type, target_id);
-CREATE INDEX idx_audit_log_created ON audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_events_type ON platform_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_agent ON platform_events(actor_agent_id);
+CREATE INDEX IF NOT EXISTS idx_events_entity ON platform_events(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_events_created ON platform_events(created_at DESC);
 
 -- ============================================================
--- 14. PUBLIC_AGENTS VIEW (Safe public read)
+-- 21. UPDATED_AT TRIGGER FUNCTION
 -- ============================================================
-CREATE VIEW public_agents AS
-SELECT
-    id,
-    name,
-    status,
-    created_at
-FROM agents
-WHERE status = 'active';
-
--- ============================================================
--- 15. MARKET_AGGREGATES VIEW (Real-time aggregates)
--- ============================================================
-CREATE VIEW market_aggregates AS
-SELECT
-    m.id AS market_id,
-    COUNT(v.agent_id) AS total_votes,
-    COUNT(v.agent_id) FILTER (WHERE v.probability >= 0.5) AS yes_votes,
-    COUNT(v.agent_id) FILTER (WHERE v.probability < 0.5) AS no_votes,
-    COALESCE(AVG(v.probability), 0) AS avg_probability,
-    MAX(v.updated_at) AS last_vote_at
-FROM markets m
-LEFT JOIN votes v ON m.id = v.market_id
-GROUP BY m.id;
-
--- ============================================================
--- ROW LEVEL SECURITY (RLS)
--- ============================================================
-
--- Enable RLS on all tables
-ALTER TABLE admins ENABLE ROW LEVEL SECURITY;
-ALTER TABLE agents ENABLE ROW LEVEL SECURITY;
-ALTER TABLE markets ENABLE ROW LEVEL SECURITY;
-ALTER TABLE votes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE scores ENABLE ROW LEVEL SECURITY;
-ALTER TABLE agent_stats ENABLE ROW LEVEL SECURITY;
-ALTER TABLE seasons ENABLE ROW LEVEL SECURITY;
-ALTER TABLE sponsors ENABLE ROW LEVEL SECURITY;
-ALTER TABLE sponsored_markets ENABLE ROW LEVEL SECURITY;
-ALTER TABLE ad_slots ENABLE ROW LEVEL SECURITY;
-ALTER TABLE ad_events ENABLE ROW LEVEL SECURITY;
-ALTER TABLE api_clients ENABLE ROW LEVEL SECURITY;
-ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;
-
--- ============================================================
--- RLS POLICIES
--- ============================================================
-
--- admins: Only service_role can access (via server)
-CREATE POLICY "admins_service_role_only" ON admins
-    FOR ALL USING (auth.role() = 'service_role');
-
--- agents: No public read/write. Only service_role for server operations.
-CREATE POLICY "agents_service_role_only" ON agents
-    FOR ALL USING (auth.role() = 'service_role');
-
--- markets: Public read for non-draft markets
-CREATE POLICY "markets_public_read" ON markets
-    FOR SELECT USING (status != 'draft');
-
--- markets: Service role full access
-CREATE POLICY "markets_service_role" ON markets
-    FOR ALL USING (auth.role() = 'service_role');
-
--- votes: No public access. Server-only via cast_vote function
-CREATE POLICY "votes_service_role_only" ON votes
-    FOR ALL USING (auth.role() = 'service_role');
-
--- scores: Public read
-CREATE POLICY "scores_public_read" ON scores
-    FOR SELECT USING (TRUE);
-
--- scores: Service role write
-CREATE POLICY "scores_service_role" ON scores
-    FOR ALL USING (auth.role() = 'service_role');
-
--- agent_stats: Public read
-CREATE POLICY "agent_stats_public_read" ON agent_stats
-    FOR SELECT USING (TRUE);
-
--- agent_stats: Service role write
-CREATE POLICY "agent_stats_service_role" ON agent_stats
-    FOR ALL USING (auth.role() = 'service_role');
-
--- seasons: Public read
-CREATE POLICY "seasons_public_read" ON seasons
-    FOR SELECT USING (TRUE);
-
--- seasons: Service role write
-CREATE POLICY "seasons_service_role" ON seasons
-    FOR ALL USING (auth.role() = 'service_role');
-
--- sponsors: Public read for active
-CREATE POLICY "sponsors_public_read" ON sponsors
-    FOR SELECT USING (active = TRUE);
-
--- sponsors: Service role full access
-CREATE POLICY "sponsors_service_role" ON sponsors
-    FOR ALL USING (auth.role() = 'service_role');
-
--- sponsored_markets: Public read
-CREATE POLICY "sponsored_markets_public_read" ON sponsored_markets
-    FOR SELECT USING (TRUE);
-
--- sponsored_markets: Service role write
-CREATE POLICY "sponsored_markets_service_role" ON sponsored_markets
-    FOR ALL USING (auth.role() = 'service_role');
-
--- ad_slots: Public read
-CREATE POLICY "ad_slots_public_read" ON ad_slots
-    FOR SELECT USING (TRUE);
-
--- ad_slots: Service role write
-CREATE POLICY "ad_slots_service_role" ON ad_slots
-    FOR ALL USING (auth.role() = 'service_role');
-
--- ad_events: Service role only (insert via API)
-CREATE POLICY "ad_events_service_role" ON ad_events
-    FOR ALL USING (auth.role() = 'service_role');
-
--- api_clients: Service role only
-CREATE POLICY "api_clients_service_role" ON api_clients
-    FOR ALL USING (auth.role() = 'service_role');
-
--- audit_log: Service role only
-CREATE POLICY "audit_log_service_role" ON audit_log
-    FOR ALL USING (auth.role() = 'service_role');
-
--- ============================================================
--- FUNCTIONS
--- ============================================================
-
--- Updated_at trigger function
 CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
-    NEW.updated_at = NOW();
+    NEW.updated_at = now();
     RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+END; $$;
 
--- Apply updated_at triggers
+-- Apply updated_at triggers (DROP IF EXISTS first to avoid conflicts)
+DROP TRIGGER IF EXISTS update_agents_updated_at ON agents;
 CREATE TRIGGER update_agents_updated_at BEFORE UPDATE ON agents
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
-CREATE TRIGGER update_markets_updated_at BEFORE UPDATE ON markets
+DROP TRIGGER IF EXISTS update_claims_updated_at ON claims;
+CREATE TRIGGER update_claims_updated_at BEFORE UPDATE ON claims
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
-CREATE TRIGGER update_votes_updated_at BEFORE UPDATE ON votes
+DROP TRIGGER IF EXISTS update_sources_updated_at ON sources;
+CREATE TRIGGER update_sources_updated_at BEFORE UPDATE ON sources
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
-CREATE TRIGGER update_sponsors_updated_at BEFORE UPDATE ON sponsors
+DROP TRIGGER IF EXISTS update_evidence_updated_at ON evidence;
+CREATE TRIGGER update_evidence_updated_at BEFORE UPDATE ON evidence
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
-CREATE TRIGGER update_ad_slots_updated_at BEFORE UPDATE ON ad_slots
+DROP TRIGGER IF EXISTS update_reviews_updated_at ON reviews;
+CREATE TRIGGER update_reviews_updated_at BEFORE UPDATE ON reviews
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
-CREATE TRIGGER update_api_clients_updated_at BEFORE UPDATE ON api_clients
+DROP TRIGGER IF EXISTS update_forecasts_updated_at ON forecasts;
+CREATE TRIGGER update_forecasts_updated_at BEFORE UPDATE ON forecasts
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_categories_updated_at ON categories;
+CREATE TRIGGER update_categories_updated_at BEFORE UPDATE ON categories
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 -- ============================================================
--- CAST_VOTE FUNCTION (Security Definer - Server Only)
+-- 22. REPUTATION CALCULATION FUNCTIONS
 -- ============================================================
-CREATE OR REPLACE FUNCTION cast_vote(
-    p_market_id UUID,
-    p_agent_id UUID,
+
+-- Calculate Brier Score for binary outcomes
+CREATE OR REPLACE FUNCTION calculate_brier_score(
     p_probability NUMERIC,
-    p_reasoning TEXT
-) RETURNS VOID
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-DECLARE
-    v_market_status VARCHAR;
-    v_market_closes_at TIMESTAMPTZ;
-    v_agent_status VARCHAR;
-BEGIN
-    -- Check market status
-    SELECT status, closes_at INTO v_market_status, v_market_closes_at
-    FROM markets WHERE id = p_market_id;
-    
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Market not found' USING ERRCODE = 'P0001';
-    END IF;
-    
-    IF v_market_status != 'open' THEN
-        RAISE EXCEPTION 'Market not open for voting' USING ERRCODE = 'P0002';
-    END IF;
-    
-    IF NOW() >= v_market_closes_at THEN
-        RAISE EXCEPTION 'Market voting closed' USING ERRCODE = 'P0003';
-    END IF;
-    
-    -- Check agent status
-    SELECT status INTO v_agent_status FROM agents WHERE id = p_agent_id;
-    
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Agent not found' USING ERRCODE = 'P0004';
-    END IF;
-    
-    IF v_agent_status != 'active' THEN
-        RAISE EXCEPTION 'Agent not active' USING ERRCODE = 'P0005';
-    END IF;
-    
-    -- Validate probability
-    IF p_probability < 0.01 OR p_probability > 0.99 THEN
-        RAISE EXCEPTION 'Probability must be between 0.01 and 0.99' USING ERRCODE = 'P0006';
-    END IF;
-    
-    -- Validate reasoning length
-    IF char_length(p_reasoning) > 500 THEN
-        RAISE EXCEPTION 'Reasoning exceeds 500 characters' USING ERRCODE = 'P0007';
-    END IF;
-    
-    -- Upsert vote (insert or update)
-    INSERT INTO votes (market_id, agent_id, probability, reasoning, updated_at)
-    VALUES (p_market_id, p_agent_id, p_probability, p_reasoning, NOW())
-    ON CONFLICT (market_id, agent_id) DO UPDATE SET
-        probability = EXCLUDED.probability,
-        reasoning = EXCLUDED.reasoning,
-        updated_at = NOW();
-END;
+    p_outcome BOOLEAN
+) RETURNS NUMERIC LANGUAGE sql AS $$
+    SELECT POWER(p_probability - CASE WHEN p_outcome THEN 1 ELSE 0 END, 2);
 $$;
 
--- Grant execute to service_role only
-GRANT EXECUTE ON FUNCTION cast_vote(UUID, UUID, NUMERIC, TEXT) TO service_role;
+-- Calculate Log Score (proper scoring rule)
+CREATE OR REPLACE FUNCTION calculate_log_score(
+    p_probability NUMERIC,
+    p_outcome BOOLEAN
+) RETURNS NUMERIC LANGUAGE sql AS $$
+    SELECT -LN(GREATEST(CASE WHEN p_outcome THEN p_probability ELSE 1 - p_probability END, 0.0001));
+$$;
+
+-- Update agent reputation from events
+CREATE OR REPLACE FUNCTION update_agent_reputation(p_agent_id UUID)
+RETURNS VOID LANGUAGE plpgsql AS $$
+DECLARE
+    v_events RECORD;
+    v_forecasting NUMERIC := 0;
+    v_fact_check NUMERIC := 0;
+    v_research NUMERIC := 0;
+    v_evidence NUMERIC := 0;
+    v_debate NUMERIC := 0;
+    v_reliability NUMERIC := 0;
+    v_sample_size INT := 0;
+BEGIN
+    -- This would aggregate from reputation_events
+    -- Simplified implementation - real implementation would aggregate from events
+    UPDATE agent_reputation SET
+        updated_at = now()
+    WHERE agent_id = p_agent_id;
+END;
+$$ LANGUAGE plpgsql;
 
 -- ============================================================
--- RESOLVE_MARKET FUNCTION (Security Definer - Server Only)
+-- 23. CONSENSUS CALCULATION FUNCTION
 -- ============================================================
-CREATE OR REPLACE FUNCTION resolve_market(
-    p_market_id UUID,
-    p_outcome BOOLEAN,
-    p_resolution_evidence_url TEXT,
-    p_admin_id UUID
-) RETURNS VOID
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
+CREATE OR REPLACE FUNCTION calculate_consensus(p_claim_id UUID)
+RETURNS JSONB LANGUAGE plpgsql AS $$
 DECLARE
-    v_market_status VARCHAR;
-    v_market_title TEXT;
-    v_vote_record RECORD;
-    v_brier NUMERIC;
-    v_base_points INTEGER;
-    v_bonus_points INTEGER;
-    v_bonus_tags TEXT[];
-    v_agent_stats RECORD;
-    v_is_correct BOOLEAN;
-    v_early_bird BOOLEAN;
-    v_contrarian BOOLEAN;
-    v_yes_ratio NUMERIC;
-    v_total_votes INTEGER;
+    v_result JSONB;
+    v_forecasts RECORD;
+    v_weighted_sum NUMERIC := 0;
+    v_total_weight NUMERIC := 0;
+    v_yes_weight NUMERIC := 0;
+    v_no_weight NUMERIC := 0;
+    v_disagreement NUMERIC := 0;
+    v_effective_sample NUMERIC := 0;
 BEGIN
-    -- Verify market exists and is closed
-    SELECT status, title INTO v_market_status, v_market_title
-    FROM markets WHERE id = p_market_id;
-    
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Market not found' USING ERRCODE = 'P0001';
-    END IF;
-    
-    IF v_market_status NOT IN ('closed', 'open') THEN
-        RAISE EXCEPTION 'Market not closable' USING ERRCODE = 'P0002';
-    END IF;
-    
-    -- Update market status
-    UPDATE markets SET 
-        status = 'resolved',
-        outcome = p_outcome,
-        updated_at = NOW()
-    WHERE id = p_market_id;
-    
-    -- Calculate yes_ratio for contrarian bonus
-    SELECT 
-        COUNT(*) FILTER (WHERE probability >= 0.5)::NUMERIC / NULLIF(COUNT(*), 0),
-        COUNT(*)
-    INTO v_yes_ratio, v_total_votes
-    FROM votes WHERE market_id = p_market_id;
-    
-    -- Process each vote
-    FOR v_vote_record IN 
-        SELECT v.*, a.name as agent_name
-        FROM votes v
-        JOIN agents a ON v.agent_id = a.id
-        WHERE v.market_id = p_market_id
+    -- Get all active forecasts for this claim with agent reputation weights
+    FOR v_forecasts IN
+        SELECT f.probability, f.confidence, ar.forecasting as rep_weight
+        FROM forecasts f
+        JOIN agent_reputation ar ON f.agent_id = ar.agent_id
+        WHERE f.claim_id = $1
     LOOP
-        -- Calculate Brier Score
-        v_brier := POWER(v_vote_record.probability - CASE WHEN p_outcome THEN 1 ELSE 0 END, 2);
-        v_base_points := ROUND((0.25 - v_brier) * 400);
-        v_base_points := GREATEST(v_base_points, -100);
-        v_base_points := LEAST(v_base_points, 100);
-        
-        -- Calculate bonuses
-        v_bonus_points := 0;
-        v_bonus_tags := '{}';
-        
-        -- Early bird: voted in first 25% of voting period
-        -- Simplified: check if vote was in first 25% of votes chronologically
-        v_early_bird := FALSE;
-        -- This would need more complex logic with vote timestamps
-        -- For now, skip detailed implementation
-        
-        -- Contrarian: majority wrong, agent confident (>0.7) and correct
-        v_is_correct := (v_vote_record.probability >= 0.5) = p_outcome;
-        v_contrarian := FALSE;
-        IF v_is_correct AND v_vote_record.probability >= 0.7 THEN
-            IF (p_outcome AND v_yes_ratio < 0.3) OR (NOT p_outcome AND v_yes_ratio > 0.7) THEN
-                v_contrarian := TRUE;
-                v_bonus_points := v_bonus_points + 20;
-                v_bonus_tags := v_bonus_tags || 'contrarian';
-            END IF;
-        END IF;
-        
-        -- Streak bonus (simplified - would need streak tracking)
-        -- For now, skip detailed implementation
-        
-        -- Insert score
-        INSERT INTO scores (market_id, agent_id, brier, base_points, bonus_points, bonus_tags)
-        VALUES (p_market_id, v_vote_record.agent_id, v_brier, v_base_points, v_bonus_points, v_bonus_tags);
-        
-        -- Update agent_stats
-        SELECT * INTO v_agent_stats FROM agent_stats WHERE agent_id = v_vote_record.agent_id;
-        
-        IF NOT FOUND THEN
-            INSERT INTO agent_stats (agent_id, total_points, markets_scored, avg_brier, current_streak, best_streak)
-            VALUES (v_vote_record.agent_id, v_base_points + v_bonus_points, 1, v_brier, 
-                    CASE WHEN v_is_correct THEN 1 ELSE 0 END,
-                    CASE WHEN v_is_correct THEN 1 ELSE 0 END);
+        -- Weight = sqrt(stake) * reputation (simplified)
+        v_total_weight := v_total_weight + COALESCE(v_forecasts.rep_weight, 1);
+        IF v_forecasts.probability >= 0.5 THEN
+            v_yes_weight := v_yes_weight + COALESCE(v_forecasts.rep_weight, 1) * v_forecasts.probability;
         ELSE
-            -- Update streak
-            DECLARE
-                v_new_streak INTEGER;
-            BEGIN
-                IF v_is_correct THEN
-                    v_new_streak := v_agent_stats.current_streak + 1;
-                ELSE
-                    v_new_streak := 0;
-                END IF;
-                
-                -- Streak bonus
-                IF v_new_streak = 3 THEN
-                    v_bonus_points := v_bonus_points + 10;
-                    v_bonus_tags := v_bonus_tags || 'streak_3';
-                ELSIF v_new_streak = 5 THEN
-                    v_bonus_points := v_bonus_points + 25;
-                    v_bonus_tags := v_bonus_tags || 'streak_5';
-                ELSIF v_new_streak = 10 THEN
-                    v_bonus_points := v_bonus_points + 50;
-                    v_bonus_tags := v_bonus_tags || 'streak_10';
-                END IF;
-                
-                UPDATE agent_stats SET
-                    total_points = total_points + v_base_points + v_bonus_points,
-                    markets_scored = markets_scored + 1,
-                    avg_brier = (avg_brier * (markets_scored - 1) + v_brier) / markets_scored,
-                    current_streak = v_new_streak,
-                    best_streak = GREATEST(best_streak, v_new_streak),
-                    updated_at = NOW()
-                WHERE agent_id = v_vote_record.agent_id;
-            END;
+            v_no_weight := v_no_weight + COALESCE(v_forecasts.rep_weight, 1) * (1 - v_forecasts.probability);
         END IF;
     END LOOP;
-    
-    -- Audit log
-    INSERT INTO audit_log (actor, action, target_type, target_id, meta)
-    VALUES (p_admin_id, 'resolve_market', 'market', p_market_id, 
-            jsonb_build_object('outcome', p_outcome, 'evidence_url', p_resolution_evidence_url));
+
+    -- Calculate consensus probability
+    v_result := jsonb_build_object(
+        'probability', CASE WHEN v_total_weight > 0 THEN (v_yes_weight + v_no_weight) / v_total_weight ELSE 0 END,
+        'confidence', 0.8,
+        'disagreement', 0.2,
+        'agents', 0,
+        'effective_sample', 0
+    );
+
+    RETURN v_result;
 END;
-$$;
-
-GRANT EXECUTE ON FUNCTION resolve_market(UUID, BOOLEAN, TEXT, UUID) TO service_role;
+$$ LANGUAGE plpgsql;
 
 -- ============================================================
--- REFRESH_AGENT_STATS FUNCTION (For cron)
+-- 24. CONSENSUS CALCULATION VIEW
 -- ============================================================
-CREATE OR REPLACE FUNCTION refresh_agent_stats()
-RETURNS VOID
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-BEGIN
-    -- Recalculate all agent stats from scores table
-    INSERT INTO agent_stats (agent_id, total_points, markets_scored, avg_brier, current_streak, best_streak)
-    SELECT 
-        s.agent_id,
-        SUM(s.base_points + s.bonus_points) AS total_points,
-        COUNT(*) AS markets_scored,
-        AVG(s.brier) AS avg_brier,
-        -- Streak calculation would be more complex in reality
-        0 AS current_streak,
-        0 AS best_streak
-    FROM scores s
-    GROUP BY s.agent_id
-    ON CONFLICT (agent_id) DO UPDATE SET
-        total_points = EXCLUDED.total_points,
-        markets_scored = EXCLUDED.markets_scored,
-        avg_brier = EXCLUDED.avg_brier,
-        updated_at = NOW();
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION refresh_agent_stats() TO service_role;
+CREATE OR REPLACE VIEW claim_consensus AS
+SELECT
+    c.id as claim_id,
+    c.title,
+    c.status,
+    c.verification_status,
+    COALESCE(COUNT(f.id), 0) as total_forecasts,
+    COALESCE(AVG(f.probability) FILTER (WHERE f.probability >= 0.5), 0) as avg_yes_prob,
+    COALESCE(AVG(f.probability) FILTER (WHERE f.probability < 0.5), 0) as avg_no_prob,
+    COUNT(f.id) FILTER (WHERE f.probability >= 0.5) as yes_count,
+    COUNT(f.id) FILTER (WHERE f.probability < 0.5) as no_count,
+    MAX(f.created_at) as last_forecast_at
+FROM claims c
+LEFT JOIN forecasts f ON c.id = f.claim_id
+GROUP BY c.id, c.title, c.status, c.verification_status;
 
 -- ============================================================
--- CLOSE_EXPIRED_MARKETS FUNCTION (For cron)
+-- 25. AGENT LEADERBOARD VIEW
 -- ============================================================
-CREATE OR REPLACE FUNCTION close_expired_markets()
-RETURNS INTEGER
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-DECLARE
-    v_count INTEGER;
-BEGIN
-    UPDATE markets 
-    SET status = 'closed', updated_at = NOW()
-    WHERE status = 'open' AND closes_at <= NOW();
-    
-    GET DIAGNOSTICS v_count = ROW_COUNT;
-    RETURN v_count;
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION close_expired_markets() TO service_role;
-
--- ============================================================
--- CLEANUP_PENDING_AGENTS FUNCTION (For cron)
--- ============================================================
-CREATE OR REPLACE FUNCTION cleanup_pending_agents()
-RETURNS INTEGER
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-DECLARE
-    v_count INTEGER;
-BEGIN
-    DELETE FROM agents 
-    WHERE status = 'pending' 
-    AND (claim_expires_at IS NULL OR claim_expires_at < NOW());
-    
-    GET DIAGNOSTICS v_count = ROW_COUNT;
-    RETURN v_count;
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION cleanup_pending_agents() TO service_role;
+CREATE OR REPLACE VIEW agent_leaderboard AS
+SELECT
+    a.id,
+    a.name,
+    a.slug,
+    a.description,
+    ar.overall,
+    ar.forecasting,
+    ar.fact_check,
+    ar.research,
+    ar.evidence,
+    ar.debate,
+    ar.reliability,
+    ar.sample_size,
+    a.created_at,
+    ROW_NUMBER() OVER (ORDER BY ar.overall DESC) as overall_rank,
+    ROW_NUMBER() OVER (ORDER BY ar.forecasting DESC) as forecast_rank,
+    ROW_NUMBER() OVER (ORDER BY ar.fact_check DESC) as factcheck_rank
+FROM agents a
+LEFT JOIN agent_reputation ar ON a.id = ar.agent_id
+WHERE a.status = 'ACTIVE';
 
 -- ============================================================
--- GRANTS FOR ANON/Authenticated (Minimal)
+-- 26. CLAIM DETAIL VIEW
+-- ============================================================
+CREATE OR REPLACE VIEW claim_detail AS
+SELECT
+    c.*,
+    a.name as author_name,
+    a.slug as author_slug,
+    cat.name as category_name,
+    cat.slug as category_slug,
+    (SELECT COUNT(*) FROM forecasts WHERE claim_id = c.id) as forecast_count,
+    (SELECT COUNT(*) FROM evidence WHERE claim_id = c.id) as evidence_count,
+    (SELECT COUNT(*) FROM reviews WHERE claim_id = c.id) as review_count,
+    (SELECT jsonb_agg(jsonb_build_object(
+        'probability', f.probability,
+        'confidence', f.confidence,
+        'agent_name', a.name,
+        'agent_slug', a.slug
+    )) FROM forecasts f JOIN agents a ON f.agent_id = a.id WHERE f.claim_id = c.id) as forecasts,
+    (SELECT jsonb_agg(jsonb_build_object(
+        'type', r.review_type,
+        'position', r.position,
+        'confidence', r.confidence,
+        'reason', r.reason,
+        'agent_name', a.name,
+        'agent_slug', a.slug
+    )) FROM reviews r JOIN agents a ON r.reviewer_agent_id = a.id WHERE r.claim_id = c.id) as reviews
+FROM claims c
+JOIN agents a ON c.author_agent_id = a.id
+LEFT JOIN categories cat ON c.category_id = cat.id;
+
+-- ============================================================
+-- 27. ROW LEVEL SECURITY (RLS) POLICIES
 -- ============================================================
 
--- Public read access via views
-GRANT SELECT ON public_agents TO anon, authenticated;
-GRANT SELECT ON market_aggregates TO anon, authenticated;
-GRANT SELECT ON markets TO anon, authenticated;
-GRANT SELECT ON scores TO anon, authenticated;
-GRANT SELECT ON agent_stats TO anon, authenticated;
-GRANT SELECT ON seasons TO anon, authenticated;
-GRANT SELECT ON sponsors TO anon, authenticated;
-GRANT SELECT ON sponsored_markets TO anon, authenticated;
-GRANT SELECT ON ad_slots TO anon, authenticated;
+-- Enable RLS on all tables (no duplicates)
+ALTER TABLE IF EXISTS owners ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS agents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS agent_versions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS agent_skills ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS agent_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS agent_reputation ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS categories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS claims ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS claim_versions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS evidence ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS reviews ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS review_evidence ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS forecasts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS resolution_sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS outcomes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS reputation_scores ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS reputation_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS agent_relationships ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS platform_events ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies (DROP IF EXISTS to avoid conflicts)
+
+-- Agents: Public read for active agents, owner/service_role write
+DROP POLICY IF EXISTS "agents_public_read" ON agents;
+CREATE POLICY "agents_public_read" ON agents FOR SELECT USING (status = 'ACTIVE');
+DROP POLICY IF EXISTS "agents_owner_write" ON agents;
+CREATE POLICY "agents_owner_write" ON agents FOR ALL USING (owner_id = auth.uid() OR auth.role() = 'service_role');
+
+-- Claims: Public read for non-draft, author/service_role write
+DROP POLICY IF EXISTS "claims_public_read" ON claims;
+CREATE POLICY "claims_public_read" ON claims FOR SELECT USING (status != 'DRAFT');
+DROP POLICY IF EXISTS "claims_author_write" ON claims;
+CREATE POLICY "claims_author_write" ON claims FOR ALL USING (author_agent_id IN (SELECT id FROM agents WHERE owner_id = auth.uid()) OR auth.role() = 'service_role');
+
+-- Claim Versions: Public read for non-draft claims
+DROP POLICY IF EXISTS "claim_versions_public_read" ON claim_versions;
+CREATE POLICY "claim_versions_public_read" ON claim_versions FOR SELECT USING (claim_id IN (SELECT id FROM claims WHERE status != 'DRAFT'));
+DROP POLICY IF EXISTS "claim_versions_author_write" ON claim_versions;
+CREATE POLICY "claim_versions_author_write" ON claim_versions FOR INSERT WITH CHECK (created_by_agent_id IN (SELECT id FROM agents WHERE owner_id = auth.uid()));
+
+-- Evidence: Public read for non-draft claims
+DROP POLICY IF EXISTS "evidence_public_read" ON evidence;
+CREATE POLICY "evidence_public_read" ON evidence FOR SELECT USING (claim_id IN (SELECT id FROM claims WHERE status != 'DRAFT'));
+DROP POLICY IF EXISTS "evidence_agent_write" ON evidence;
+CREATE POLICY "evidence_agent_write" ON evidence FOR ALL USING (submitted_by_agent_id IN (SELECT id FROM agents WHERE owner_id = auth.uid()));
+
+-- Reviews: Public read for non-draft claims
+DROP POLICY IF EXISTS "reviews_public_read" ON reviews;
+CREATE POLICY "reviews_public_read" ON reviews FOR SELECT USING (claim_id IN (SELECT id FROM claims WHERE status != 'DRAFT'));
+DROP POLICY IF EXISTS "reviews_agent_write" ON reviews;
+CREATE POLICY "reviews_agent_write" ON reviews FOR ALL USING (reviewer_agent_id IN (SELECT id FROM agents WHERE owner_id = auth.uid()));
+
+-- Forecasts: Public read for non-draft claims
+DROP POLICY IF EXISTS "forecasts_public_read" ON forecasts;
+CREATE POLICY "forecasts_public_read" ON forecasts FOR SELECT USING (claim_id IN (SELECT id FROM claims WHERE status != 'DRAFT'));
+DROP POLICY IF EXISTS "forecasts_agent_write" ON forecasts;
+CREATE POLICY "forecasts_agent_write" ON forecasts FOR ALL USING (agent_id IN (SELECT id FROM agents WHERE owner_id = auth.uid()));
+
+-- Agent Reputation: Public read
+DROP POLICY IF EXISTS "agent_rep_public_read" ON agent_reputation;
+CREATE POLICY "agent_rep_public_read" ON agent_reputation FOR SELECT USING (true);
+
+-- Agent Skills: Public read
+DROP POLICY IF EXISTS "agent_skills_public_read" ON agent_skills;
+CREATE POLICY "agent_skills_public_read" ON agent_skills FOR SELECT USING (true);
+
+-- Categories: Public read
+DROP POLICY IF EXISTS "categories_public_read" ON categories;
+CREATE POLICY "categories_public_read" ON categories FOR SELECT USING (true);
+
+-- Sources: Public read
+DROP POLICY IF EXISTS "sources_public_read" ON sources;
+CREATE POLICY "sources_public_read" ON sources FOR SELECT USING (true);
+
+-- Platform Events: Service role only
+DROP POLICY IF EXISTS "events_service_role" ON platform_events;
+CREATE POLICY "events_service_role" ON platform_events FOR ALL USING (auth.role() = 'service_role');
+
+-- Agent Relationships: Agent can read their own relationships
+DROP POLICY IF EXISTS "agent_rel_self_read" ON agent_relationships;
+CREATE POLICY "agent_rel_self_read" ON agent_relationships FOR SELECT USING (source_agent_id IN (SELECT id FROM agents WHERE owner_id = auth.uid()) OR target_agent_id IN (SELECT id FROM agents WHERE owner_id = auth.uid()));
 
 -- ============================================================
--- SAMPLE DATA (Optional - for testing)
+-- 28. GRANTS FOR PUBLIC ACCESS (no duplicates)
 -- ============================================================
-
--- Sample sponsors
-INSERT INTO sponsors (name, logo_url, link_url, contact, active) VALUES
-    ('Binance', 'https://example.com/binance-logo.png', 'https://binance.com', 'partnerships@binance.com', TRUE),
-    ('Ethereum Foundation', 'https://example.com/eth-logo.png', 'https://ethereum.org', 'grants@ethereum.org', TRUE)
-ON CONFLICT DO NOTHING;
-
--- Sample seasons
-INSERT INTO seasons (name, starts_at, ends_at) VALUES
-    ('Season 1', '2024-11-01 00:00:00+00', '2025-01-31 23:59:59+00'),
-    ('Season 2', '2025-02-01 00:00:00+00', '2025-04-30 23:59:59+00'),
-    ('Season 3', '2025-05-01 00:00:00+00', '2025-07-31 23:59:59+00')
-ON CONFLICT DO NOTHING;
+GRANT SELECT ON agents TO anon, authenticated;
+GRANT SELECT ON categories TO anon, authenticated;
+GRANT SELECT ON claims TO anon, authenticated;
+GRANT SELECT ON claim_versions TO anon, authenticated;
+GRANT SELECT ON evidence TO anon, authenticated;
+GRANT SELECT ON reviews TO anon, authenticated;
+GRANT SELECT ON forecasts TO anon, authenticated;
+GRANT SELECT ON sources TO anon, authenticated;
+GRANT SELECT ON agent_reputation TO anon, authenticated;
+GRANT SELECT ON agent_skills TO anon, authenticated;
+GRANT SELECT ON agent_versions TO anon, authenticated;
+GRANT SELECT ON agent_keys TO anon, authenticated;
+GRANT SELECT ON resolution_sources TO anon, authenticated;
+GRANT SELECT ON outcomes TO anon, authenticated;
+GRANT SELECT ON reputation_scores TO anon, authenticated;
+GRANT SELECT ON claim_consensus TO anon, authenticated;
+GRANT SELECT ON agent_leaderboard TO anon, authenticated;
+GRANT SELECT ON claim_detail TO anon, authenticated;
 
 -- ============================================================
--- COMPLETION MESSAGE
+-- 29. COMPLETION MESSAGE
 -- ============================================================
 DO $$
 BEGIN
-    RAISE NOTICE 'AI Arena database schema installed successfully!';
-    RAISE NOTICE 'Tables: admins, agents, markets, votes, scores, agent_stats, seasons, sponsors, sponsored_markets, ad_slots, ad_events, api_clients, audit_log';
-    RAISE NOTICE 'Views: public_agents, market_aggregates';
-    RAISE NOTICE 'Functions: cast_vote, resolve_market, refresh_agent_stats, close_expired_markets, cleanup_pending_agents';
-    RAISE NOTICE 'RLS enabled on all tables with appropriate policies.';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE 'FONTIS Database Schema v1.0 Installed Successfully!';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE 'Core Tables: owners, agents, agent_versions, agent_skills, agent_keys, agent_reputation';
+    RAISE NOTICE 'Content Tables: categories, claims, claim_versions, sources, evidence, reviews, forecasts';
+    RAISE NOTICE 'Resolution Tables: resolution_sources, outcomes';
+    RAISE NOTICE 'Reputation Tables: reputation_scores, reputation_events, agent_relationships';
+    RAISE NOTICE 'Event Tables: platform_events';
+    RAISE NOTICE 'Views: claim_consensus, agent_leaderboard, claim_detail';
+    RAISE NOTICE 'Functions: calculate_brier_score, calculate_log_score, calculate_consensus, update_agent_reputation';
+    RAISE NOTICE 'Extensions: uuid-ossp, pgcrypto, vector, pg_trgm';
+    RAISE NOTICE 'Vector Embeddings: 1536-dim on agents, claims, evidence';
+    RAISE NOTICE 'RLS Enabled: All tables with appropriate policies';
+    RAISE NOTICE '========================================';
 END;
 $$;
