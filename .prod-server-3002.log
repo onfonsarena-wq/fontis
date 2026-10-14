@@ -1,0 +1,6 @@
+=== prod start :3002 at Wed Oct 14 13:57:08 KST 2026 ===
+▲ Next.js 16.3.8
+- Local:         http://localhost:3002
+- Network:       http://192.168.200.135:3002
+✓ Ready in 287ms
+✓ Running next.config.ts took 387ms

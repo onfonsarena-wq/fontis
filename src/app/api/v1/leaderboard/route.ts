@@ -1,107 +1,57 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
+import { createAdminClient } from '@/lib/supabase/admin'
 
-interface AgentStat {
-  agent_id: string
-  total_points: number
-  markets_scored: number
-  avg_brier: number
-  current_streak: number
-  best_streak: number
-  agent: {
-    id: string
-    name: string
-    badges: string[]
-    status: string
-  }[]
-}
-
+/**
+ * GET /api/v1/leaderboard
+ * Agent leaderboard via the agent_leaderboard view.
+ * Query: ?metric=overall|forecasting|fact_check&limit=50
+ */
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createClient()
-    
-    // Parse query parameters
-    const searchParams = request.nextUrl.searchParams
-    const type = searchParams.get('type') || 'overall'
-    const season = searchParams.get('season')
-    const category = searchParams.get('category')
-    const limit = Math.min(parseInt(searchParams.get('limit') || '50'), 100)
-    
-    // Build query based on type
-    let query = supabase
-      .from('agent_stats')
-      .select(`
-        agent_id,
-        total_points,
-        markets_scored,
-        avg_brier,
-        current_streak,
-        best_streak,
-        agent:agents!inner(id, name, badges, status)
-      `)
-      .eq('agent.status', 'active')
-      .gte('markets_scored', 5) // Minimum 5 markets for ranking
-      .limit(limit)
-    
-    // Apply ordering based on type
-    switch (type) {
-      case 'weekly':
-      case 'monthly':
-      case 'season':
-        // In production, would filter by season date range
-        // For now, fall back to overall with note
-        query = query.order('total_points', { ascending: false })
-        break
-      case 'streak':
-        query = query.order('current_streak', { ascending: false })
-        break
-      case 'brier':
-        query = query.order('avg_brier', { ascending: true })
-        break
-      case 'contrarian':
-        // Would need a contrarian_score column
-        query = query.order('total_points', { ascending: false })
-        break
-      default: // overall
-        query = query.order('total_points', { ascending: false })
-    }
-    
-    // Apply category filter (would need category_rank table in production)
-    if (category) {
-      // For now, just note it
-      console.log('Category filter requested:', category)
-    }
-    
-    const { data: stats, error } = await query
-    
-    if (error) {
-      console.error('Leaderboard query error:', error)
+    const supabase = createAdminClient()
+    const sp = request.nextUrl.searchParams
+    const metric = sp.get('metric') ?? 'overall'
+    const limit = Math.min(parseInt(sp.get('limit') ?? '50', 10) || 50, 200)
+
+    const allowedMetrics = ['overall', 'forecasting', 'fact_check', 'research', 'evidence', 'debate', 'reliability']
+    if (!allowedMetrics.includes(metric)) {
       return NextResponse.json(
-        { error: 'internal_error', message: '랭킹 조회 중 오류가 발생했습니다.' },
-        { status: 500 }
+        {
+          error: 'invalid_metric',
+          message: `metric 은 ${allowedMetrics.join('|')} 중 하나여야 합니다.`,
+        },
+        { status: 400 }
       )
     }
-    
-    // Format response with ranks
-    const leaderboard = (stats || []).map((stat, index) => ({
-      rank: index + 1,
-      agent_id: stat.agent_id,
-      name: stat.agent?.[0]?.name || 'Unknown',
-      total_points: stat.total_points,
-      markets_scored: stat.markets_scored,
-      avg_brier: stat.avg_brier,
-      current_streak: stat.current_streak,
-      best_streak: stat.best_streak,
-      badges: stat.agent?.[0]?.badges || [],
+
+    const { data: rows, error } = await supabase
+      .from('agent_leaderboard')
+      .select('*')
+      .order(metric, { ascending: false, nullsFirst: false })
+      .limit(limit)
+
+    if (error) throw error
+
+    const leaderboard = (rows || []).map((row, idx) => ({
+      rank: idx + 1,
+      // view column is `id` pre-003, `agent_id` post-003 — normalize
+      agent_id: (row as Record<string, unknown>).agent_id ?? (row as Record<string, unknown>).id,
+      name: row.name,
+      slug: row.slug,
+      description: row.description,
+      metrics: {
+        overall: Number(row.overall ?? 0),
+        forecasting: Number(row.forecasting ?? 0),
+        fact_check: Number(row.fact_check ?? 0),
+        research: Number(row.research ?? 0),
+        evidence: Number(row.evidence ?? 0),
+        debate: Number(row.debate ?? 0),
+        reliability: Number(row.reliability ?? 0),
+      },
+      sample_size: row.sample_size ?? 0,
     }))
-    
-    return NextResponse.json({
-      leaderboard,
-      type,
-      season: season || 'current',
-      category: category || 'all',
-    })
-    
+
+    return NextResponse.json({ metric, leaderboard })
   } catch (error) {
     console.error('Leaderboard error:', error)
     return NextResponse.json(

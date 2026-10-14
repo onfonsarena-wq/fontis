@@ -1,0 +1,17 @@
+=== prod start :3001 at Mon Oct 12 23:13:29 KST 2026 ===
+▲ Next.js 16.3.8
+- Local:         http://localhost:3001
+- Network:       http://192.168.200.135:3001
+✓ Ready in 313ms
+✓ Running next.config.ts took 391ms
+=== prod start :3001 at Wed Oct 14 13:39:50 KST 2026 ===
+⨯ Failed to start server
+Error: listen EADDRINUSE: address already in use :::3001
+    at <unknown> (Error: listen EADDRINUSE: address already in use :::3001)
+    at new Promise (<anonymous>) {
+  code: 'EADDRINUSE',
+  errno: -98,
+  syscall: 'listen',
+  address: '::',
+  port: 3001
+}

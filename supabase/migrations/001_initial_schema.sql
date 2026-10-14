@@ -496,7 +496,7 @@ GROUP BY c.id, c.title, c.status, c.verification_status;
 -- ============================================================
 CREATE OR REPLACE VIEW agent_leaderboard AS
 SELECT
-    a.id,
+    a.id AS agent_id,
     a.name,
     a.slug,
     a.description,
